@@ -21,27 +21,52 @@ postwalk(f, x) = f(x)
 postwalk(f, expr::Expr) = f(Expr(expr.head, (postwalk(f, arg) for arg in expr.args)...))
 
 """
-    @muladd ex
+    @muladd [aggressive=false] ex
 
 Convert every combination of addition/subtraction and multiplication in
 expression `ex` to a call of `muladd`.
 
 If both of the involved operators are dotted, `muladd` is applied as a dot call.
 The order of summation might be changed.
+
+If `aggressive` is set to `true`, some additional replacements will be performed.
+- Squares as powers with literal exponent `2` are replaced by multiplications.
+  Note that this will cause trouble if the expression to be squared has side
+  effects or is expensive.
 """
 macro muladd(ex)
-    esc(to_muladd(ex))
+    esc(to_muladd(ex, :(aggressive=false)))
+end
+
+macro muladd(aggressive, ex)
+    esc(to_muladd(ex, aggressive))
 end
 
 """
     to_muladd(ex)
 
-Convert every combination of addition/subtraction and multiplication in expression `ex` to a call of `muladd`.
+Convert every combination of addition/subtraction and multiplication in
+expression `ex` to a call of `muladd`.
 
 If both of the involved operators are dotted, `muladd` is applied as a dot call
 The order of summation might be changed.
 """
-function to_muladd(ex)
+function to_muladd(ex, kwargs...)
+    # parse keyword arguments
+    aggressive = process_kwargs(kwargs)
+    @info "to_muladdd" @__LINE__() aggressive ex
+
+    # replace some operators with explicit calls to `*` and `+`
+    if aggressive
+        ex = postwalk(ex) do x
+            issquare(x) && return square_to_mul(x)
+
+            return x
+        end
+    end
+    @info "to_muladdd" @__LINE__() aggressive ex
+
+    # finally replace summations and subtractions
     postwalk(ex) do x
         # Modify summations
         issum(x) && return sum_to_muladd(x)
@@ -52,6 +77,27 @@ function to_muladd(ex)
         return x
     end
 end
+
+# process keyword arguments of `@muladd`
+function process_kwargs(kwargs)
+    aggressive = false
+
+    for kwarg in kwargs
+        if !((kwarg.head === :(=)) && (length(kwarg.args) == 2))
+            throw(ArgumentError("macro kwarg should be of the form `argname = value`."))
+        end
+        kw = (kwarg.args[1])::Symbol
+        arg = (kwarg.args[2])
+        if kw === :aggressive
+            aggressive = arg::Bool
+        else
+            throw(ArgumentError("Received unrecognized keyword argument $kw. Recognized is only `aggressive`."))
+        end
+    end
+
+    return aggressive
+end
+
 
 """
     sum_to_muladd(ex)
@@ -96,6 +142,24 @@ function sub_to_muladd(ex)
         return newmuladd(:(-$y₁), y₂, x, dotcall)
     elseif ismul(x, dotcall)
         return newmuladd(splitargs(x)..., :(-$y), dotcall)
+    end
+
+    return ex
+end
+
+"""
+    square_to_mul(ex)
+
+Replace square with literal power `2` in `ex` by `*` if possible.
+"""
+function square_to_mul(ex)
+    if issquare(ex)
+        # Replace `^` by `*`
+        if isdotcall(ex, :^)
+            return Expr(:call, :(.*), ex.args[2], ex.args[2])
+        else
+            return Expr(:call, :(*),  ex.args[2], ex.args[2])
+        end
     end
 
     return ex
@@ -151,6 +215,13 @@ Determine whether expression `ex` is a multiplication that is dotted if
 `dot` is `true` and not dotted otherwise.
 """
 ismul(ex, dot::Bool) = dot ? isdotcall(ex, :*) : iscall(ex, :*)
+
+"""
+    issquare(ex)
+
+Determine whether `ex` is an explicit square of the form `a^2`.
+"""
+issquare(ex) = (iscall(ex, :^) || isdotcall(ex, :^)) && (ex.args[3] == 2)
 
 """
     newmuladd(x, y, z, dot::Bool)
